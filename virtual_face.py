@@ -1,4 +1,5 @@
 import sys
+import socket
 
 from PyQt5.QtCore import Qt, QTimer, QRectF
 from PyQt5.QtGui import QColor, QPainter, QPen
@@ -269,6 +270,24 @@ class VirtualFaceWindow(QMainWindow):
         self.status = QLabel("Current emotion: Neutral")
         self.status.setWordWrap(True)
         right.addWidget(self.status)
+
+        # Listen for emotion labels from Unreal Engine.
+        self.udp_socket = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM
+        )
+        self.udp_socket.bind(("127.0.0.1", 5005))
+        self.udp_socket.setblocking(False)
+
+        self.udp_timer = QTimer(self)
+        self.udp_timer.setInterval(100)
+        self.udp_timer.timeout.connect(self.poll_udp)
+        self.udp_timer.start()
+
+        self.status.setText(
+            "Current emotion: Neutral\nListening on 127.0.0.1:5005"
+        )
+
         right.addStretch()
 
         layout.addLayout(left, 3)
@@ -292,6 +311,28 @@ class VirtualFaceWindow(QMainWindow):
                 background: #2e4964;
             }
         """)
+
+    def poll_udp(self):
+        while True:
+            try:
+                data, _ = self.udp_socket.recvfrom(1024)
+            except BlockingIOError:
+                break
+            except OSError as exc:
+                self.status.setText(f"UDP error: {exc}")
+                return
+
+            emotion = data.decode(
+                "utf-8",
+                errors="replace"
+            ).strip().lower()
+
+            if emotion in EMOTIONS:
+                self.choose(emotion)
+            else:
+                self.status.setText(
+                    f"Unknown emotion received: {emotion}"
+                )
 
     def choose(self, emotion):
         self.face.set_emotion(emotion)
