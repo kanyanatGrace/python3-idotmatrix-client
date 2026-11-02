@@ -1,6 +1,14 @@
 import sys
 import socket
 
+import subprocess
+import threading
+
+from pathlib import Path
+from queue import Queue, Empty, Full
+
+from PyQt5.QtCore import QObject, pyqtSignal
+
 from PyQt5.QtCore import Qt, QTimer, QRectF
 from PyQt5.QtGui import QColor, QPainter, QPen
 from PyQt5.QtWidgets import (
@@ -224,6 +232,115 @@ class PixelFace(QWidget):
         p.end()
 
 
+class PhysicalDisplayUploader(QObject):
+    status_changed = pyqtSignal(str)
+
+    def __init__(self, project_dir, parent=None):
+        super().__init__(parent)
+
+        self.project_dir = Path(project_dir)
+        self.gif_dir = self.project_dir / "emotion_gifs"
+
+        # Only keep the newest pending emotion.
+        self.jobs = Queue(maxsize=1)
+
+        # Uploads happen in a background thread so the
+        # virtual display remains responsive.
+        self.worker_thread = threading.Thread(
+            target=self._run,
+            daemon=True
+        )
+        self.worker_thread.start()
+
+    def enqueue(self, emotion):
+        if emotion not in EMOTIONS:
+            return
+
+        # Replace an older pending emotion if necessary.
+        try:
+            self.jobs.put_nowait(emotion)
+        except Full:
+            try:
+                self.jobs.get_nowait()
+                self.jobs.task_done()
+            except Empty:
+                pass
+
+            try:
+                self.jobs.put_nowait(emotion)
+            except Full:
+                return
+
+        self.status_changed.emit(
+            f"Physical display: queued {emotion}"
+        )
+
+    def _run(self):
+        while True:
+            emotion = self.jobs.get()
+
+            try:
+                gif_path = (
+                    self.gif_dir /
+                    f"{emotion}_transition.gif"
+                )
+
+                if not gif_path.is_file():
+                    self.status_changed.emit(
+                        f"Missing GIF: {gif_path.name}"
+                    )
+                    continue
+
+                command = [
+                    sys.executable,
+                    str(self.project_dir / "app.py"),
+                    "--address",
+                    "auto",
+                    "--set-gif",
+                    str(gif_path)
+                ]
+
+                self.status_changed.emit(
+                    f"Uploading {emotion} to physical display..."
+                )
+
+                result = subprocess.run(
+                    command,
+                    cwd=str(self.project_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+
+                if result.returncode == 0:
+                    self.status_changed.emit(
+                        f"Physical display updated: {emotion}"
+                    )
+                else:
+                    details = (
+                        result.stderr or result.stdout or
+                        "Unknown upload error"
+                    )
+
+                    self.status_changed.emit(
+                        f"Upload failed for {emotion}: "
+                        f"{details[-500:]}"
+                    )
+
+            except subprocess.TimeoutExpired:
+                self.status_changed.emit(
+                    f"Upload timed out: {emotion}"
+                )
+
+            except Exception as exc:
+                self.status_changed.emit(
+                    f"Physical display error: {exc}"
+                )
+
+            finally:
+                self.jobs.task_done()
+
+
 class VirtualFaceWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -270,6 +387,18 @@ class VirtualFaceWindow(QMainWindow):
         self.status = QLabel("Current emotion: Neutral")
         self.status.setWordWrap(True)
         right.addWidget(self.status)
+
+        # Initialize the physical iDotMatrix uploader.
+        project_dir = Path(__file__).resolve().parent
+
+        self.physical_uploader = PhysicalDisplayUploader(
+            project_dir,
+            self
+        )
+
+        self.physical_uploader.status_changed.connect(
+            self.status.setText
+        )
 
         # Listen for emotion labels from Unreal Engine.
         self.udp_socket = socket.socket(
@@ -335,10 +464,18 @@ class VirtualFaceWindow(QMainWindow):
                 )
 
     def choose(self, emotion):
+        if emotion not in EMOTIONS:
+            return
+
+        # Update the virtual face.
         self.face.set_emotion(emotion)
+
+        # Update the physical iDotMatrix display.
+        self.physical_uploader.enqueue(emotion)
+
         self.status.setText(
             f"Selected emotion: {emotion.title()}\n"
-            "Transition: blink, change expression, open eyes"
+            "Virtual and physical displays are updating."
         )
 
 
