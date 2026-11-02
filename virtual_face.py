@@ -10,7 +10,7 @@ from queue import Queue, Empty, Full
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from PyQt5.QtCore import Qt, QTimer, QRectF
-from PyQt5.QtGui import QColor, QPainter, QPen
+from PyQt5.QtGui import QColor, QPainter, QImage
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -35,34 +35,99 @@ TEAR = "#42d6ff"
 
 
 class PixelFace(QWidget):
-    """A 32x32 pixel face with simple emotion transitions."""
+    """Displays custom 32x32 faces with a blink transition."""
 
     def __init__(self):
         super().__init__()
 
         self.setMinimumSize(480, 480)
 
+        self.image_dir = (
+            Path(__file__).resolve().parent / "emotion_faces"
+        )
+
+        self.images = {}
+
+        # Load all seven custom emotion faces.
+        for emotion in EMOTIONS:
+            image_path = self.image_dir / f"{emotion}.png"
+            image = QImage(str(image_path))
+
+            if image.isNull():
+                raise FileNotFoundError(
+                    f"Could not load: {image_path}"
+                )
+
+            if image.width() != 32 or image.height() != 32:
+                raise ValueError(
+                    f"{emotion}.png must be exactly 32x32."
+                )
+
+            self.images[emotion] = image
+
+        # Load the custom transparent blink overlay.
+        blink_path = self.image_dir / "blink_overlay.png"
+        self.blink_overlay = QImage(str(blink_path))
+
+        if self.blink_overlay.isNull():
+            raise FileNotFoundError(
+                f"Could not load blink overlay: {blink_path}"
+            )
+
+        if (
+            self.blink_overlay.width() != 32
+            or self.blink_overlay.height() != 32
+        ):
+            raise ValueError(
+                "blink_overlay.png must be exactly 32x32."
+            )
+
+        if not self.blink_overlay.hasAlphaChannel():
+            raise ValueError(
+                "blink_overlay.png must have transparency (RGBA)."
+            )
+
+        # Current expression.
         self.current = "neutral"
         self.previous = "neutral"
         self.target = "neutral"
+
+        # -1 means no transition.
+        # 0 = previous face
+        # 1 = eyes closed
+        # 2 = eyes remain closed
+        # 3 = new face appears
         self.phase = -1
 
         self.timer = QTimer(self)
-        self.timer.setInterval(100)
+        self.timer.setInterval(120)
         self.timer.timeout.connect(self.advance_transition)
 
     def set_emotion(self, emotion):
-        if emotion not in EMOTIONS:
+        if emotion not in self.images:
             return
 
-        self.previous = self.current
+        if self.phase == -1 and emotion == self.current:
+            return
+
+        # If another emotion arrives during a transition,
+        # use the previous target as the starting expression.
+        starting_emotion = (
+            self.target if self.phase != -1 else self.current
+        )
+
+        if starting_emotion == emotion:
+            return
+
+        self.previous = starting_emotion
         self.target = emotion
         self.phase = 0
+
         self.timer.start()
         self.update()
 
     def advance_transition(self):
-        if self.phase < 2:
+        if self.phase < 3:
             self.phase += 1
             self.update()
         else:
@@ -71,165 +136,65 @@ class PixelFace(QWidget):
             self.timer.stop()
             self.update()
 
-    @staticmethod
-    def pixel(p, x, y, color):
-        p.fillRect(x, y, 1, 1, QColor(color))
-
-    @staticmethod
-    def line(p, x1, y1, x2, y2, color=FEATURE):
-        pen = QPen(QColor(color))
-        pen.setWidthF(1)
-        pen.setCapStyle(Qt.SquareCap)
-        p.setPen(pen)
-        p.drawLine(x1, y1, x2, y2)
-
-    @classmethod
-    def draw_rect(cls, p, x, y, w, h, color=FEATURE, filled=True):
-        if filled:
-            p.fillRect(QRectF(x, y, w, h), QColor(color))
-        else:
-            pen = QPen(QColor(color))
-            pen.setWidthF(1)
-            p.setPen(pen)
-            p.drawRect(QRectF(x, y, w - 1, h - 1))
-
-    @classmethod
-    def ellipse(cls, p, x, y, w, h, color=FEATURE, filled=False):
-        if filled:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(color))
-            p.drawEllipse(QRectF(x, y, w, h))
-        else:
-            pen = QPen(QColor(color))
-            pen.setWidthF(1)
-            p.setPen(pen)
-            p.setBrush(Qt.NoBrush)
-            p.drawEllipse(QRectF(x, y, w, h))
-
-    def draw_face(self, p, emotion, eyes_closed=False):
-        # Face silhouette: exactly 32x32 logical pixels.
-        for y in range(3, 30):
-            for x in range(4, 28):
-                distance = (
-                    ((x - 16) / 11) ** 2
-                    + ((y - 16) / 12.5) ** 2
-                )
-
-                if distance <= 1:
-                    color = FACE_EDGE if distance > 0.82 else FACE
-                    self.pixel(p, x, y, color)
-
-        # Eyebrows.
-        if emotion == "anger":
-            self.line(p, 8, 8, 13, 11)
-            self.line(p, 18, 11, 23, 8)
-
-        elif emotion == "sadness":
-            self.line(p, 8, 10, 13, 8)
-            self.line(p, 19, 8, 24, 10)
-
-        elif emotion in ("fear", "surprise"):
-            self.line(p, 8, 7, 13, 7)
-            self.line(p, 19, 7, 24, 7)
-
-        elif emotion == "disgust":
-            self.line(p, 8, 9, 13, 10)
-            self.line(p, 19, 8, 24, 7)
-
-        else:
-            self.line(p, 9, 9, 13, 9)
-            self.line(p, 19, 9, 23, 9)
-
-        # Eyes.
-        if eyes_closed:
-            self.line(p, 9, 13, 13, 13)
-            self.line(p, 19, 13, 23, 13)
-
-        elif emotion == "joy":
-            self.line(p, 9, 13, 11, 15)
-            self.line(p, 11, 15, 13, 13)
-            self.line(p, 19, 13, 21, 15)
-            self.line(p, 21, 15, 23, 13)
-
-        elif emotion == "anger":
-            self.draw_rect(p, 10, 12, 3, 2)
-            self.draw_rect(p, 20, 12, 3, 2)
-
-        elif emotion == "sadness":
-            self.draw_rect(p, 10, 12, 2, 3)
-            self.draw_rect(p, 20, 12, 2, 3)
-            self.pixel(p, 13, 16, TEAR)
-
-        elif emotion == "fear":
-            self.draw_rect(p, 9, 10, 5, 6, filled=False)
-            self.draw_rect(p, 19, 10, 5, 6, filled=False)
-            self.draw_rect(p, 11, 12, 2, 2)
-            self.draw_rect(p, 21, 12, 2, 2)
-
-        elif emotion == "surprise":
-            self.ellipse(p, 9, 10, 4, 6)
-            self.ellipse(p, 19, 10, 4, 6)
-
-        elif emotion == "disgust":
-            self.line(p, 9, 13, 13, 13)
-            self.draw_rect(p, 20, 12, 3, 3)
-
-        else:
-            self.draw_rect(p, 10, 11, 3, 4)
-            self.draw_rect(p, 20, 11, 3, 4)
-
-        # Mouth.
-        if emotion == "joy":
-            self.line(p, 10, 20, 13, 23)
-            self.line(p, 13, 23, 19, 23)
-            self.line(p, 19, 23, 22, 20)
-
-        elif emotion == "sadness":
-            self.line(p, 10, 23, 13, 21)
-            self.line(p, 13, 21, 19, 21)
-            self.line(p, 19, 21, 22, 23)
-
-        elif emotion == "anger":
-            self.line(p, 12, 22, 20, 22)
-            self.line(p, 13, 23, 19, 23)
-
-        elif emotion in ("fear", "surprise"):
-            self.ellipse(p, 14, 19, 4, 6)
-
-        elif emotion == "disgust":
-            self.line(p, 11, 21, 15, 22)
-            self.line(p, 15, 22, 20, 20)
-            self.pixel(p, 21, 20, FEATURE)
-
-        else:
-            self.line(p, 12, 22, 20, 22)
-
     def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, False)
-        p.fillRect(self.rect(), QColor("#02070d"))
+        painter = QPainter(self)
+
+        painter.setRenderHint(
+            QPainter.SmoothPixmapTransform,
+            False
+        )
+
+        painter.fillRect(
+            self.rect(),
+            QColor("#02070d")
+        )
 
         side = min(self.width(), self.height())
-        scale = side / 32
-        ox = (self.width() - side) / 2
-        oy = (self.height() - side) / 2
 
-        p.translate(ox, oy)
-        p.scale(scale, scale)
-        p.fillRect(QRectF(0, 0, 32, 32), QColor(BACKGROUND))
+        offset_x = (self.width() - side) / 2
+        offset_y = (self.height() - side) / 2
 
-        # Transition: close eyes, change expression, open eyes.
-        if self.phase == 0:
-            emotion, closed = self.previous, True
-        elif self.phase == 1:
-            emotion, closed = self.target, True
-        elif self.phase == 2:
-            emotion, closed = self.target, False
-        else:
-            emotion, closed = self.current, False
+        destination = QRectF(
+            offset_x,
+            offset_y,
+            side,
+            side
+        )
 
-        self.draw_face(p, emotion, closed)
-        p.end()
+        if self.phase == -1:
+            # Normal expression.
+            painter.drawImage(
+                destination,
+                self.images[self.current]
+            )
+
+        elif self.phase == 0:
+            # Show the previous expression.
+            painter.drawImage(
+                destination,
+                self.images[self.previous]
+            )
+
+        elif self.phase in (1, 2):
+            # Close the eyes using your custom overlay.
+            painter.drawImage(
+                destination,
+                self.images[self.previous]
+            )
+
+            painter.drawImage(
+                destination,
+                self.blink_overlay
+            )
+
+        elif self.phase == 3:
+            # Open the eyes with the new expression.
+            painter.drawImage(
+                destination,
+                self.images[self.target]
+            )
+
+        painter.end()
 
 
 class PhysicalDisplayUploader(QObject):
